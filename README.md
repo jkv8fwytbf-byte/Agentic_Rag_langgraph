@@ -1,92 +1,158 @@
-# `graph/` — Agentic RAG (outer core)
+# Agentic RAG
 
-## 1. One-liner
+An adaptive retrieval-augmented generation (RAG) pipeline built with **LangGraph**. The agent routes each question to the right data source, grades retrieved documents for relevance, falls back to web search when needed, and checks answers for hallucinations before returning them.
 
-`graph/` is a **LangGraph** workflow: you ask a question → it picks vectorstore or web search → builds an answer → checks that the answer is grounded and useful (and retries if not).
+Inspired by the [LangGraph Adaptive RAG / Corrective RAG](https://langchain-ai.github.io/langgraph/tutorials/rag/langgraph_adaptive_rag/) pattern.
 
-## 2. Folder map
+## Features
 
-| Piece | Role |
-|-------|------|
-| [`graph/state.py`](graph/state.py) | Shared notebook passed between steps (`GraphState`) |
-| [`graph/consts.py`](graph/consts.py) | Node name strings (`retrieve`, `generate`, …) |
-| [`graph/nodes/`](graph/nodes/) | Steps that **update state** (retrieve, grade docs, web search, generate) |
-| [`graph/chains/`](graph/chains/) | LLM helpers used by nodes/routers (route, relevance, generate, hallucination, answer) |
-| [`graph/graph.py`](graph/graph.py) | Wires nodes + decision edges → compiled `app` |
+- **Query routing** — sends agent / prompt-engineering / adversarial-attack questions to the vector store; everything else goes to web search
+- **Document grading** — filters out irrelevant chunks and triggers web search when retrieval quality is low
+- **Hallucination & answer grading** — regenerates or searches again if the answer is ungrounded or off-topic
+- **Pinecone vector store** — embeds and retrieves from Lilian Weng’s blog posts on agents, prompting, and LLM attacks
+- **Tavily web search** — live fallback when the index is not enough
 
-**nodes vs chains:** nodes are graph steps; chains are the LLM tools those steps (and routers) call.
-
-Docs for retrieve come from the Pinecone retriever in [`ingestion.py`](ingestion.py).
-
-## 3. Inputs → Outputs
-
-| When | In | Out |
-|------|----|-----|
-| **Defined** | — | Compiled graph `app` in `graph.py` |
-| **Invoked** | `{"question": "..."}` | Final state with `generation` (plus `documents` along the way) |
-
-## 4. State fields (`GraphState`)
-
-| Field | Meaning |
-|-------|---------|
-| `question` | User question |
-| `documents` | Retrieved / filtered / web docs |
-| `web_search` | “Do we still need the web?” flag after grading docs |
-| `generation` | Final answer string |
-
-## 5. Data flow
+## Architecture
 
 ```mermaid
 flowchart TD
-  start[question] --> route[route_question]
-  route -->|vectorstore| retrieve[retrieve]
-  route -->|websearch| websearch[websearch]
-  retrieve --> gradeDocs[grade_documents]
-  gradeDocs -->|docs ok| generate[generate]
-  gradeDocs -->|need web| websearch
-  websearch --> generate
-  generate --> check[hallucination then answer grade]
-  check -->|useful| done[END]
-  check -->|not supported| generate
-  check -->|not useful| websearch
+    Start([Question]) --> Router{Route question}
+    Router -->|vectorstore| Retrieve[Retrieve]
+    Router -->|websearch| WebSearch[Web Search]
+    Retrieve --> GradeDocs[Grade Documents]
+    GradeDocs -->|relevant| Generate[Generate]
+    GradeDocs -->|not relevant| WebSearch
+    WebSearch --> Generate
+    Generate --> GradeAns{Grounded & useful?}
+    GradeAns -->|not supported| Generate
+    GradeAns -->|not useful| WebSearch
+    GradeAns -->|useful| End([Answer])
 ```
 
-1. **`route_question`** — vectorstore or websearch?
-2. **`retrieve` → `grade_documents`** — pull docs, drop irrelevant ones; set `web_search` if needed.
-3. **`websearch`** (if routed or docs weak) → then **`generate`**.
-4. After **`generate`**: grounded? answers the question?
-   - useful → **END**
-   - not grounded → generate again
-   - grounded but not useful → websearch → generate
+| Stage | What happens |
+| --- | --- |
+| **Route** | LLM decides `vectorstore` vs `websearch` |
+| **Retrieve** | Similarity search over the Pinecone index |
+| **Grade documents** | Keep relevant chunks; set a web-search flag if any are irrelevant |
+| **Web search** | Fetch Tavily results and append them as context |
+| **Generate** | Answer from question + documents (`gpt-4o-mini`) |
+| **Grade answer** | Check grounding, then whether the answer addresses the question |
 
-## 6. Weird syntax only (in `graph.py`)
+## Project structure
 
-- **`StateGraph(GraphState)`** — graph whose memory shape is `GraphState`.
-- **`add_node(name, fn)`** — register a step; `fn` takes state, returns updates.
-- **`add_edge(A, B)`** — always go A → B.
-- **`set_conditional_entry_point` / `add_conditional_edges`** — a function picks the next node from the current state.
-- **`END`** — stop.
-- **`app = workflow.compile()`** — turn the blueprint into something you can `.invoke(...)`.
+```
+.
+├── main.py                 # Entry point — invoke the graph with a sample question
+├── ingestion.py            # Load URLs → chunk → upsert to Pinecone; exports `retriever`
+├── graph/
+│   ├── graph.py            # StateGraph wiring, routing, and grading edges
+│   ├── state.py            # GraphState (question, documents, generation, web_search)
+│   ├── consts.py           # Node name constants
+│   ├── nodes/              # retrieve, grade_documents, generate, web_search
+│   └── chains/             # router, graders, and generation LCEL chains
+├── pyproject.toml
+└── .env                    # API keys (not committed)
+```
 
-## 7. Filled mini-example
+## Prerequisites
 
-Question: `"What are the types of agent memory?"`
+- Python **3.13+**
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Accounts / keys for:
+  - [OpenAI](https://platform.openai.com/)
+  - [Pinecone](https://www.pinecone.io/) (index with **1024** dimensions for `text-embedding-3-large`)
+  - [Tavily](https://tavily.com/)
+  - [LangSmith](https://smith.langchain.com/) (optional, for tracing)
 
-1. Router → **vectorstore** (topic matches your indexed Lilian Weng posts).
-2. **retrieve** fills `documents`.
-3. **grade_documents** keeps relevant chunks; `web_search` stays false.
-4. **generate** writes `generation`.
-5. Hallucination + answer graders say **useful** → **END**.
+## Setup
 
-You’d run it like:
+1. **Clone and install**
+
+```bash
+git clone <your-repo-url>
+cd "4.Agentic RAG"
+uv sync
+```
+
+2. **Configure environment**
+
+Create a `.env` in the project root:
+
+```env
+OPENAI_API_KEY=sk-...
+PINECONE_API_KEY=...
+INDEX_NAME=your-pinecone-index-name
+TAVILY_API_KEY=tvly-...
+
+# Optional — LangSmith tracing
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=agentic-rag
+```
+
+Create a Pinecone index that matches the embedding config in `ingestion.py`:
+
+- Model: `text-embedding-3-large`
+- Dimensions: `1024`
+- Metric: cosine (typical for this setup)
+
+3. **Ingest documents** (once, or whenever you want to refresh the index)
+
+```bash
+uv run python ingestion.py
+```
+
+This loads three Lilian Weng posts, splits them into ~250-token chunks, and upserts them into `INDEX_NAME`.
+
+## Usage
+
+Run the graph with the sample question:
+
+```bash
+uv run python main.py
+```
+
+By default that asks: *“What are the types of agent memory?”* and prints `result["generation"]`.
+
+To ask something else, edit `main.py`:
 
 ```python
-from graph.graph import app
-
-result = app.invoke({"question": "What are the types of agent memory?"})
+result = app.invoke({"question": "Your question here"})
 print(result["generation"])
 ```
 
-## 8. Not happening yet
+### Export the graph diagram
 
-This README only **explains** the graph. [`main.py`](main.py) still just prints hello — it does not call `app.invoke(...)` yet.
+```bash
+uv run python -m graph.graph
+```
+
+Writes `graph.png` (Mermaid render of the compiled StateGraph).
+
+## Graph state
+
+```python
+class GraphState(TypedDict):
+    question: str
+    generation: str
+    web_search: bool
+    documents: List[Document]
+```
+
+Each node reads from this state and returns a partial update. Conditional edges use `web_search` and the grader scores to decide the next step.
+
+## Tech stack
+
+| Piece | Choice |
+| --- | --- |
+| Orchestration | LangGraph `StateGraph` |
+| LLM | OpenAI `gpt-4o-mini` |
+| Embeddings | OpenAI `text-embedding-3-large` (1024-d) |
+| Vector DB | Pinecone |
+| Web search | Tavily |
+| Config | `python-dotenv` |
+
+## License
+
+Personal / learning project — use and adapt as you like.

@@ -2,7 +2,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-llm = ChatOpenAI(temperature=0)
+model = ChatOpenAI(model="gpt-4o-mini")
 
 # Inline equivalent of hub.pull("rlm/rag-prompt") — the hub module was removed
 # from the langchain package, and pulling public prompts now requires a
@@ -20,4 +20,4 @@ prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-generation_chain = prompt | llm | StrOutputParser()
+generation_chain = prompt | model | StrOutputParser()

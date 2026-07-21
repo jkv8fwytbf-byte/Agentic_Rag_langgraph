@@ -1,5 +1,13 @@
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
 def main():
-    print("Hello from agentic-rag!")
+    from graph.graph import app
+
+    result = app.invoke({"question": "What are the types of agent memory?"})
+    print(result["generation"])
 
 
 if __name__ == "__main__":
